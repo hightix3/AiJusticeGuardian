@@ -1,0 +1,535 @@
+# AI正义卫士系统 - 完整API集成实施指南
+
+## 概述
+
+本指南基于零信任架构原则，为AI正义卫士系统提供完整的多平台API集成方案。涵盖StealSeek数据泄露监控、Chainalysis区块链分析、TRM Labs风险评估和DeepSeek AI智能助手等核心平台的安全集成。
+
+## 1. 环境准备与依赖安装
+
+### 1.1 Python环境配置
+
+```bash
+# 创建虚拟环境
+python -m venv ai-justice-env
+source ai-justice-env/bin/activate  # Linux/Mac
+# ai-justice-env\Scripts\activate   # Windows
+
+# 安装核心依赖
+pip install requests aiohttp python-gnupg cryptography
+pip install openai  # DeepSeek兼容
+pip install pandas numpy python-dotenv
+```
+
+### 1.2 安全依赖配置
+
+```bash
+# 安装PGP和加密工具
+pip install pgpy python-jose[cryptography]
+pip install sops  # 密钥管理工具
+
+# 安装零信任架构组件
+pip install authlib httpx-oauth
+```
+
+## 2. 安全配置与密钥管理
+
+### 2.1 环境变量配置 (.env)
+
+```bash
+# StealSeek API配置
+STEALSEEK_API_KEY=encrypted_with_pgp_key_here
+STEALSEEK_BASE_URL=https://api.stealseek.io
+STEALSEEK_PGP_FINGERPRINT=1A67A699D16ED93FB02774BC98561CC83F7697C3
+
+# Chainalysis API配置  
+CHAINALYSIS_API_KEY=your_chainalysis_api_key
+CHAINALYSIS_BASE_URL=https://api.chainalysis.com
+CHAINALYSIS_CLIENT_ID=your_oauth_client_id
+CHAINALYSIS_CLIENT_SECRET=your_oauth_secret
+
+# TRM Labs API配置
+TRMLABS_API_KEY=your_trmlabs_bearer_token
+TRMLABS_BASE_URL=https://api.trmlabs.com
+
+# DeepSeek API配置
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+### 2.2 SOPS加密配置
+
+```yaml
+# .sops.yaml
+creation_rules:
+  - pgp: '1A67A699D16ED93FB02774BC98561CC83F7697C3'
+    encrypted_regex: '^(api_key|secret|password|token)$'
+```
+
+## 3. 核心API集成类实现
+
+### 3.1 基础安全API客户端
+
+```python
+import asyncio
+import aiohttp
+import gnupg
+import json
+import time
+import hashlib
+import hmac
+from typing import Dict, Any, Optional
+from cryptography.fernet import Fernet
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class SecureAPIClient:
+    """零信任架构下的安全API客户端基类"""
+    
+    def __init__(self, base_url: str, api_key: str):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.session = None
+        self.gpg = gnupg.GPG()
+        
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            headers={'User-Agent': 'AI-Justice-Guardian/1.0'}
+        )
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+    
+    def create_signature(self, data: str, timestamp: str) -> str:
+        """创建HMAC签名"""
+        message = f"{timestamp}{data}"
+        return hmac.new(
+            self.api_key.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+    
+    async def secure_request(self, method: str, endpoint: str, 
+                           data: Optional[Dict] = None) -> Dict[str, Any]:
+        """安全API请求"""
+        url = f"{self.base_url}{endpoint}"
+        timestamp = str(int(time.time()))
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Timestamp': timestamp,
+            'Authorization': f'Bearer {self.api_key}'
+        }
+        
+        # 添加请求签名
+        if data:
+            json_data = json.dumps(data, sort_keys=True)
+            headers['X-Signature'] = self.create_signature(json_data, timestamp)
+        
+        async with self.session.request(method, url, 
+                                      json=data, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                raise APIException(f"API请求失败: {response.status}")
+
+class APIException(Exception):
+    """API异常处理"""
+    pass
+```
+
+### 3.2 StealSeek API集成
+
+```python
+class StealSeekClient(SecureAPIClient):
+    """StealSeek数据泄露监控API客户端"""
+    
+    def __init__(self):
+        # 从环境变量读取配置
+        api_key = self.decrypt_pgp_key(os.getenv('STEALSEEK_API_KEY'))
+        base_url = os.getenv('STEALSEEK_BASE_URL')
+        super().__init__(base_url, api_key)
+        self.pgp_fingerprint = os.getenv('STEALSEEK_PGP_FINGERPRINT')
+    
+    def decrypt_pgp_key(self, encrypted_key: str) -> str:
+        """使用PGP解密API密钥"""
+        try:
+            decrypted = self.gpg.decrypt(encrypted_key)
+            if decrypted.ok:
+                return str(decrypted)
+            else:
+                raise APIException("PGP密钥解密失败")
+        except Exception as e:
+            raise APIException(f"PGP解密错误: {e}")
+    
+    def pgp_sign_request(self, data: str) -> str:
+        """使用PGP对请求进行数字签名"""
+        signed_data = self.gpg.sign(data, keyid=self.pgp_fingerprint)
+        return str(signed_data)
+    
+    async def search_leaks(self, query: str, limit: int = 100) -> Dict[str, Any]:
+        """搜索数据泄露信息"""
+        data = {
+            'query': query,
+            'limit': limit,
+            'timestamp': int(time.time())
+        }
+        
+        # 添加PGP签名
+        json_data = json.dumps(data, sort_keys=True)
+        pgp_signature = self.pgp_sign_request(json_data)
+        
+        # 修改headers添加PGP签名
+        endpoint = '/v1/search/leaks'
+        headers = {
+            'X-PGP-Signature': pgp_signature,
+            'X-PGP-Fingerprint': self.pgp_fingerprint
+        }
+        
+        return await self.secure_request('POST', endpoint, data)
+    
+    async def monitor_victim_data(self, victim_info: Dict[str, str]) -> Dict[str, Any]:
+        """监控受害者数据泄露"""
+        queries = []
+        for key, value in victim_info.items():
+            if value and key in ['email', 'phone', 'id_number']:
+                queries.append(value)
+        
+        results = []
+        for query in queries:
+            result = await self.search_leaks(query)
+            if result.get('found', False):
+                results.append({
+                    'query_type': key,
+                    'query_value': query,
+                    'leak_data': result.get('data', []),
+                    'risk_level': self.assess_risk_level(result),
+                    'timestamp': int(time.time())
+                })
+        
+        return {'victim_leaks': results, 'total_found': len(results)}
+    
+    def assess_risk_level(self, leak_data: Dict) -> str:
+        """评估泄露风险等级"""
+        leak_count = len(leak_data.get('data', []))
+        if leak_count >= 10:
+            return 'HIGH'
+        elif leak_count >= 3:
+            return 'MEDIUM'
+        else:
+            return 'LOW'
+```
+
+### 3.3 Chainalysis API集成
+
+```python
+import base64
+from urllib.parse import urlencode
+
+class ChainalysisClient(SecureAPIClient):
+    """Chainalysis区块链分析API客户端"""
+    
+    def __init__(self):
+        api_key = os.getenv('CHAINALYSIS_API_KEY')
+        base_url = os.getenv('CHAINALYSIS_BASE_URL')
+        super().__init__(base_url, api_key)
+        
+        self.client_id = os.getenv('CHAINALYSIS_CLIENT_ID')
+        self.client_secret = os.getenv('CHAINALYSIS_CLIENT_SECRET')
+        self.access_token = None
+    
+    async def get_oauth_token(self) -> str:
+        """获取OAuth 2.0访问令牌"""
+        auth_string = base64.b64encode(
+            f"{self.client_id}:{self.client_secret}".encode()
+        ).decode()
+        
+        headers = {
+            'Authorization': f'Basic {auth_string}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        data = {'grant_type': 'client_credentials'}
+        
+        async with self.session.post(
+            f"{self.base_url}/oauth/token",
+            headers=headers,
+            data=urlencode(data)
+        ) as response:
+            if response.status == 200:
+                token_data = await response.json()
+                self.access_token = token_data['access_token']
+                return self.access_token
+            else:
+                raise APIException("OAuth令牌获取失败")
+    
+    async def get_address_risk(self, address: str) -> Dict[str, Any]:
+        """获取地址风险评估"""
+        if not self.access_token:
+            await self.get_oauth_token()
+        
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        endpoint = f'/v2/addresses/{address}/risk'
+        
+        async with self.session.get(
+            f"{self.base_url}{endpoint}",
+            headers=headers
+        ) as response:
+            return await response.json()
+    
+    async def trace_transaction(self, tx_hash: str) -> Dict[str, Any]:
+        """追踪交易路径"""
+        if not self.access_token:
+            await self.get_oauth_token()
+        
+        data = {
+            'transaction_hash': tx_hash,
+            'include_flow': True,
+            'max_hops': 10
+        }
+        
+        return await self.secure_request('POST', '/v2/transactions/trace', data)
+```
+
+### 3.4 统一API管理器
+
+```python
+class AIJusticeAPIManager:
+    """AI正义卫士统一API管理器"""
+    
+    def __init__(self):
+        self.stealseek = None
+        self.chainalysis = None
+        self.trmlabs = None
+        self.deepseek = None
+    
+    async def __aenter__(self):
+        self.stealseek = StealSeekClient()
+        self.chainalysis = ChainalysisClient()
+        
+        await self.stealseek.__aenter__()
+        await self.chainalysis.__aenter__()
+        
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.stealseek:
+            await self.stealseek.__aexit__(exc_type, exc_val, exc_tb)
+        if self.chainalysis:
+            await self.chainalysis.__aexit__(exc_type, exc_val, exc_tb)
+    
+    async def comprehensive_investigation(self, 
+                                       victim_data: Dict[str, str],
+                                       suspicious_addresses: List[str]) -> Dict[str, Any]:
+        """综合调查分析"""
+        
+        # 并行执行多个API调用
+        tasks = []
+        
+        # StealSeek数据泄露检查
+        tasks.append(self.stealseek.monitor_victim_data(victim_data))
+        
+        # Chainalysis地址风险分析
+        for address in suspicious_addresses:
+            tasks.append(self.chainalysis.get_address_risk(address))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        return {
+            'victim_data_leaks': results[0] if not isinstance(results[0], Exception) else None,
+            'address_risk_analysis': [r for r in results[1:] if not isinstance(r, Exception)],
+            'analysis_timestamp': int(time.time()),
+            'investigation_id': hashlib.md5(
+                f"{victim_data}{suspicious_addresses}{time.time()}".encode()
+            ).hexdigest()
+        }
+```
+
+## 4. 使用示例
+
+### 4.1 基础使用示例
+
+```python
+async def main():
+    """主要使用示例"""
+    
+    # 受害者信息
+    victim_info = {
+        'email': 'victim@example.com',
+        'phone': '+1234567890',
+        'id_number': 'ID123456789'
+    }
+    
+    # 可疑区块链地址
+    suspicious_addresses = [
+        '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+        '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy'
+    ]
+    
+    async with AIJusticeAPIManager() as api_manager:
+        # 执行综合调查
+        investigation_results = await api_manager.comprehensive_investigation(
+            victim_info, suspicious_addresses
+        )
+        
+        print("调查结果:")
+        print(json.dumps(investigation_results, indent=2, ensure_ascii=False))
+        
+        # 单独使用StealSeek
+        leak_results = await api_manager.stealseek.search_leaks("example.com")
+        print("数据泄露搜索结果:")
+        print(json.dumps(leak_results, indent=2, ensure_ascii=False))
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### 4.2 错误处理与重试机制
+
+```python
+import asyncio
+from functools import wraps
+
+def retry(max_attempts=3, delay=1):
+    """API重试装饰器"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except APIException as e:
+                    if attempt == max_attempts - 1:
+                        raise e
+                    print(f"API调用失败，正在重试 ({attempt + 1}/{max_attempts}): {e}")
+                    await asyncio.sleep(delay * (2 ** attempt))
+            return None
+        return wrapper
+    return decorator
+
+# 使用重试机制
+@retry(max_attempts=3, delay=2)
+async def safe_api_call():
+    async with AIJusticeAPIManager() as api_manager:
+        return await api_manager.stealseek.search_leaks("test query")
+```
+
+## 5. 安全最佳实践
+
+### 5.1 密钥轮换
+
+```python
+class KeyRotationManager:
+    """API密钥轮换管理器"""
+    
+    def __init__(self):
+        self.rotation_interval = 30 * 24 * 3600  # 30天
+        
+    async def rotate_api_keys(self):
+        """自动轮换API密钥"""
+        # 实现密钥轮换逻辑
+        pass
+    
+    def schedule_rotation(self):
+        """计划密钥轮换任务"""
+        # 使用任务调度器定期轮换密钥
+        pass
+```
+
+### 5.2 访问日志与审计
+
+```python
+import logging
+from datetime import datetime
+
+class APIAuditLogger:
+    """API访问审计日志"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger('ai_justice_api')
+        handler = logging.FileHandler('api_audit.log')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
+    
+    def log_api_call(self, platform: str, endpoint: str, 
+                    user_id: str, success: bool):
+        """记录API调用"""
+        self.logger.info(f"API调用 - 平台:{platform} 端点:{endpoint} "
+                        f"用户:{user_id} 成功:{success}")
+```
+
+## 6. 部署与运维
+
+### 6.1 Docker容器化部署
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+COPY .env.example .env
+
+CMD ["python", "main.py"]
+```
+
+### 6.2 健康检查与监控
+
+```python
+from aiohttp import web
+
+async def health_check(request):
+    """API健康检查端点"""
+    async with AIJusticeAPIManager() as api_manager:
+        try:
+            # 测试各个API连接
+            await api_manager.stealseek.search_leaks("health_check")
+            return web.json_response({"status": "healthy", "timestamp": time.time()})
+        except Exception as e:
+            return web.json_response(
+                {"status": "unhealthy", "error": str(e)}, 
+                status=503
+            )
+
+app = web.Application()
+app.router.add_get('/health', health_check)
+```
+
+## 7. 故障排除
+
+### 常见问题解决方案
+
+1. **PGP密钥解密失败**
+   - 检查密钥指纹是否正确
+   - 确认私钥已正确导入GPG密钥环
+
+2. **OAuth令牌获取失败**
+   - 验证client_id和client_secret
+   - 检查API端点URL是否正确
+
+3. **API限流问题**
+   - 实现指数退避重试策略
+   - 监控API调用频率
+
+4. **网络连接超时**
+   - 增加超时时间设置
+   - 实现连接池管理
+
+## 结论
+
+本API集成指南提供了完整的零信任架构下的安全API集成方案，确保AI正义卫士系统能够安全、可靠地与各个关键平台进行数据交互。通过严格的安全措施、完善的错误处理和全面的审计机制，为执法和正义事业提供坚实的技术支撑。
